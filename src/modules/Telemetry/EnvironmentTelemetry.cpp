@@ -1,5 +1,11 @@
 #include "UptimeClock.h"
 #include "configuration.h"
+#if defined(SEEED_XIAO_S3)
+#include <HardwareSerial.h>
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+#endif
 
 #if HAS_TELEMETRY && !MESHTASTIC_EXCLUDE_ENVIRONMENTAL_SENSOR
 
@@ -152,6 +158,227 @@ extern void drawCommonHeader(OLEDDisplay *display, int16_t x, int16_t y, const c
 #include <Throttle.h>
 
 EnvironmentTelemetryModule *environmentTelemetryModule = nullptr;
+
+#if defined(SEEED_XIAO_S3)
+
+namespace NodoAmbiental {
+
+// true  = datos simulados
+// false = datos recibidos del PIC
+constexpr bool USE_SIMULATION = false;
+
+// UART dedicada al PIC
+constexpr uint32_t UART_BAUD = 9600;
+constexpr int UART_RX = 4;
+constexpr int UART_TX = -1;
+
+// UART2 para no interferir con la interfaz serie
+// utilizada por otros componentes del firmware.
+HardwareSerial picSerial(2);
+
+// Estructura interna de nuestras mediciones.
+struct EnvironmentalData {
+    float temperature = 0.0f;
+    float windSpeed = 0.0f;
+    float windGust = 0.0f;
+    uint16_t windDirection = 0;
+
+    uint32_t sequence = 0;
+    uint32_t receivedAt = 0;
+
+    bool valid = false;
+};
+
+EnvironmentalData latest;
+bool uartStarted = false;
+
+// Inicialización de la comunicación UART.
+void beginUART()
+{
+    if (uartStarted)
+        return;
+
+    picSerial.begin(
+        UART_BAUD,
+        SERIAL_8N1,
+        UART_RX,
+        UART_TX
+    );
+
+    uartStarted = true;
+
+    LOG_INFO("Nodo Ambiental: UART inicializada");
+}
+
+// Recepción de tramas provenientes del PIC.
+void pollUART()
+{
+
+    static uint32_t ultimoLog = 0;
+
+if (millis() - ultimoLog >= 10000) {
+
+    ultimoLog = millis();
+
+    LOG_INFO(
+        "[NODO AMBIENTAL] pollUART activa - bytes disponibles: %d",
+        picSerial.available()
+    );
+}
+
+    static char buffer[96];
+    static size_t index = 0;
+
+    while (picSerial.available()) {
+
+        char c = static_cast<char>(picSerial.read());
+
+        if (c == '\r')
+            continue;
+
+        if (c == '\n') {
+
+            buffer[index] = '\0';
+
+            LOG_INFO(
+    "[NODO AMBIENTAL] Trama recibida: %s",
+    buffer
+);
+
+            // ==========================================
+// INTERPRETACION DE TRAMA UART
+// ==========================================
+
+// Variables enteras
+unsigned long seq = 0;
+unsigned int direction = 0;
+
+// Buffers para los valores decimales
+char tempStr[20] = {0};
+char windStr[20] = {0};
+char gustStr[20] = {0};
+
+// Extraer los campos como texto
+int parsed = sscanf(
+    buffer,
+    "SEQ=%lu;TEMP=%19[^;];WIND=%19[^;];DIR=%u;GUST=%19s",
+    &seq,
+    tempStr,
+    windStr,
+    &direction,
+    gustStr
+);
+
+LOG_INFO(
+    "[NODO AMBIENTAL] Campos interpretados: %d",
+    parsed
+);
+
+if (parsed == 5) {
+
+    // Convertir textos a float
+    char *endTemp;
+    char *endWind;
+    char *endGust;
+
+    float temp = strtof(tempStr, &endTemp);
+    float wind = strtof(windStr, &endWind);
+    float gust = strtof(gustStr, &endGust);
+
+    // Validar conversiones y rangos
+    bool valido =
+        endTemp != tempStr &&
+        endWind != windStr &&
+        endGust != gustStr &&
+        *endTemp == '\0' &&
+        *endWind == '\0' &&
+        *endGust == '\0' &&
+        isfinite(temp) &&
+        isfinite(wind) &&
+        isfinite(gust) &&
+        temp >= -50.0f &&
+        temp <= 85.0f &&
+        wind >= 0.0f &&
+        gust >= wind &&
+        direction < 360;
+
+    if (valido) {
+
+        // Actualizar mediciones del nodo
+        latest.temperature = temp;
+        latest.windSpeed = wind;
+        latest.windGust = gust;
+        latest.windDirection = direction;
+
+        latest.sequence = seq;
+        latest.receivedAt = millis();
+        latest.valid = true;
+
+        LOG_INFO(
+            "[NODO AMBIENTAL] UART OK: SEQ=%lu TEMP=%.2f WIND=%.2f DIR=%u GUST=%.2f",
+            seq,
+            temp,
+            wind,
+            direction,
+            gust
+        );
+
+    } else {
+
+        LOG_WARN(
+            "[NODO AMBIENTAL] Valores UART invalidos"
+        );
+    }
+
+} else {
+
+    LOG_WARN(
+        "[NODO AMBIENTAL] Error interpretando trama"
+    );
+}
+
+            index = 0;
+
+        } else if (index < sizeof(buffer) - 1) {
+
+            buffer[index++] = c;
+
+        } else {
+
+            // Descartar una trama demasiado larga.
+            index = 0;
+        }
+    }
+}
+
+// Generación de mediciones simuladas.
+EnvironmentalData getSimulatedData()
+{
+    EnvironmentalData data;
+
+    uint32_t step = millis() / 10000UL;
+
+    data.temperature =
+        20.0f + (step % 10) * 0.4f;
+
+    data.windSpeed =
+        2.5f + (step % 12) * 0.35f;
+
+    data.windDirection =
+        (step * 15U) % 360U;
+
+    data.windGust =
+        data.windSpeed + 1.5f;
+
+    data.sequence = step;
+    data.valid = true;
+
+    return data;
+}
+
+} // namespace NodoAmbiental
+
+#endif
 
 namespace
 {
@@ -388,6 +615,17 @@ int32_t EnvironmentTelemetryModule::runOnce()
     }
 
     uint32_t result = UINT32_MAX;
+
+    #if defined(SEEED_XIAO_S3)
+
+    NodoAmbiental::beginUART();
+    NodoAmbiental::pollUART();
+
+    // Mantiene activa la consulta UART
+    // incluso cuando no existen sensores físicos.
+    result = 1000;
+
+    #endif
 
     if (!(moduleConfig.telemetry.environment_measurement_enabled || moduleConfig.telemetry.environment_screen_enabled ||
           ENVIRONMENTAL_TELEMETRY_MODULE_ENABLE)) {
@@ -741,6 +979,55 @@ bool EnvironmentTelemetryModule::getEnvironmentTelemetry(meshtastic_Telemetry *m
         valid = valid || get_metrics;
         hasSensor = true;
     }
+#endif
+
+#if defined(SEEED_XIAO_S3)
+
+    NodoAmbiental::EnvironmentalData data;
+
+    if (NodoAmbiental::USE_SIMULATION) {
+
+        // Obtenemos las mediciones simuladas.
+        data = NodoAmbiental::getSimulatedData();
+
+    } else {
+
+        // Utilizamos la última medición del PIC.
+        data = NodoAmbiental::latest;
+
+        // Descartamos mediciones antiguas.
+        if ((millis() - data.receivedAt) > 120000UL) {
+            data.valid = false;
+        }
+    }
+
+    if (data.valid) {
+
+        auto &env = m->variant.environment_metrics;
+
+        env.has_temperature = true;
+        env.temperature = data.temperature;
+
+        env.has_wind_speed = true;
+        env.wind_speed = data.windSpeed;
+
+        env.has_wind_direction = true;
+        env.wind_direction = data.windDirection;
+
+        env.has_wind_gust = true;
+        env.wind_gust = data.windGust;
+
+        LOG_INFO(
+            "Nodo Ambiental: TEMP=%.2f WIND=%.2f DIR=%u GUST=%.2f",
+            data.temperature,
+            data.windSpeed,
+            data.windDirection,
+            data.windGust
+        );
+
+        return true;
+    }
+
 #endif
     return valid && hasSensor;
 }
