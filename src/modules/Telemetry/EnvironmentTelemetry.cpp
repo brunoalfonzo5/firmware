@@ -171,6 +171,7 @@ constexpr bool USE_SIMULATION = false;
 constexpr uint32_t UART_BAUD = 9600;
 constexpr int UART_RX = 4;
 constexpr int UART_TX = -1;
+constexpr uint32_t UART_TIMEOUT_MS = 35000;
 
 // UART2 para no interferir con la interfaz serie
 // utilizada por otros componentes del firmware.
@@ -213,19 +214,6 @@ void beginUART()
 // Recepción de tramas provenientes del PIC.
 void pollUART()
 {
-
-    static uint32_t ultimoLog = 0;
-
-if (millis() - ultimoLog >= 10000) {
-
-    ultimoLog = millis();
-
-    LOG_INFO(
-        "[NODO AMBIENTAL] pollUART activa - bytes disponibles: %d",
-        picSerial.available()
-    );
-}
-
     static char buffer[96];
     static size_t index = 0;
 
@@ -240,12 +228,7 @@ if (millis() - ultimoLog >= 10000) {
 
             buffer[index] = '\0';
 
-            LOG_INFO(
-    "[NODO AMBIENTAL] Trama recibida: %s",
-    buffer
-);
-
-            // ==========================================
+// ==========================================
 // INTERPRETACION DE TRAMA UART
 // ==========================================
 
@@ -267,11 +250,6 @@ int parsed = sscanf(
     windStr,
     &direction,
     gustStr
-);
-
-LOG_INFO(
-    "[NODO AMBIENTAL] Campos interpretados: %d",
-    parsed
 );
 
 if (parsed == 5) {
@@ -349,6 +327,21 @@ if (parsed == 5) {
             index = 0;
         }
     }
+
+    // ============================================
+// DETECCION DE PERDIDA DE COMUNICACION
+// ============================================
+
+if (latest.valid &&
+    (uint32_t)(millis() - latest.receivedAt) > UART_TIMEOUT_MS) {
+
+    latest.valid = false;
+
+    LOG_WARN(
+        "[NODO AMBIENTAL] Comunicacion UART perdida. Datos obsoletos."
+    );
+}
+
 }
 
 // Generación de mediciones simuladas.
@@ -995,10 +988,20 @@ bool EnvironmentTelemetryModule::getEnvironmentTelemetry(meshtastic_Telemetry *m
         // Utilizamos la última medición del PIC.
         data = NodoAmbiental::latest;
 
-        // Descartamos mediciones antiguas.
-        if ((millis() - data.receivedAt) > 120000UL) {
-            data.valid = false;
-        }
+    // ============================================
+    // DETECCION DE PERDIDA DE COMUNICACION
+    // ============================================
+
+    if (NodoAmbiental::latest.valid &&
+    (uint32_t)(millis() - NodoAmbiental::latest.receivedAt) > NodoAmbiental::UART_TIMEOUT_MS) {
+
+    NodoAmbiental::latest.valid = false;
+
+    LOG_WARN(
+        "[NODO AMBIENTAL] Comunicacion UART perdida. Datos obsoletos."
+    );
+    }
+
     }
 
     if (data.valid) {
@@ -1017,16 +1020,12 @@ bool EnvironmentTelemetryModule::getEnvironmentTelemetry(meshtastic_Telemetry *m
         env.has_wind_gust = true;
         env.wind_gust = data.windGust;
 
-        LOG_INFO(
-            "Nodo Ambiental: TEMP=%.2f WIND=%.2f DIR=%u GUST=%.2f",
-            data.temperature,
-            data.windSpeed,
-            data.windDirection,
-            data.windGust
-        );
-
         return true;
     }
+
+    // No hay datos ambientales validos.
+    // No generar un paquete con mediciones obsoletas.
+    return false;
 
 #endif
     return valid && hasSensor;
