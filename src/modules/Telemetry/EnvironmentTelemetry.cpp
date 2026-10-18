@@ -180,6 +180,7 @@ HardwareSerial picSerial(2);
 // Estructura interna de nuestras mediciones.
 struct EnvironmentalData {
     float temperature = 0.0f;
+    float humidity = 0.0f;
     float windSpeed = 0.0f;
     float windGust = 0.0f;
     uint16_t windDirection = 0;
@@ -240,40 +241,48 @@ unsigned int direction = 0;
 char tempStr[20] = {0};
 char windStr[20] = {0};
 char gustStr[20] = {0};
+char humStr[20] = {0};
 
 // Extraer los campos como texto
 int parsed = sscanf(
     buffer,
-    "SEQ=%lu;TEMP=%19[^;];WIND=%19[^;];DIR=%u;GUST=%19s",
+    "SEQ=%lu;TEMP=%19[^;];WIND=%19[^;];DIR=%u;GUST=%19[^;];HUM=%19s",
     &seq,
     tempStr,
     windStr,
     &direction,
-    gustStr
+    gustStr,
+    humStr
 );
 
-if (parsed == 5) {
+if (parsed == 6) {
 
     // Convertir textos a float
     char *endTemp;
     char *endWind;
     char *endGust;
+    char *endHum;
 
     float temp = strtof(tempStr, &endTemp);
     float wind = strtof(windStr, &endWind);
     float gust = strtof(gustStr, &endGust);
+    float hum = strtof(humStr, &endHum);
 
     // Validar conversiones y rangos
     bool valido =
         endTemp != tempStr &&
         endWind != windStr &&
         endGust != gustStr &&
+        endHum != humStr &&
         *endTemp == '\0' &&
         *endWind == '\0' &&
         *endGust == '\0' &&
+        *endHum == '\0' &&
         isfinite(temp) &&
         isfinite(wind) &&
         isfinite(gust) &&
+        isfinite(hum) &&
+        hum >= 0.0f && hum <= 100.0f &&
         temp >= -50.0f &&
         temp <= 85.0f &&
         wind >= 0.0f &&
@@ -284,6 +293,7 @@ if (parsed == 5) {
 
         // Actualizar mediciones del nodo
         latest.temperature = temp;
+        latest.humidity = hum;
         latest.windSpeed = wind;
         latest.windGust = gust;
         latest.windDirection = direction;
@@ -293,9 +303,10 @@ if (parsed == 5) {
         latest.valid = true;
 
         LOG_INFO(
-            "[NODO AMBIENTAL] UART OK: SEQ=%lu TEMP=%.2f WIND=%.2f DIR=%u GUST=%.2f",
+            "[NODO AMBIENTAL] UART OK: SEQ=%lu TEMP=%.2f HUM=%.2f WIND=%.2f DIR=%u GUST=%.2f",
             seq,
             temp,
+            hum,
             wind,
             direction,
             gust
@@ -353,6 +364,8 @@ EnvironmentalData getSimulatedData()
 
     data.temperature =
         20.0f + (step % 10) * 0.4f;
+
+    data.humidity = 45.0f;
 
     data.windSpeed =
         2.5f + (step % 12) * 0.35f;
@@ -1010,6 +1023,9 @@ bool EnvironmentTelemetryModule::getEnvironmentTelemetry(meshtastic_Telemetry *m
 
         env.has_temperature = true;
         env.temperature = data.temperature;
+
+        env.has_relative_humidity = true;
+        env.relative_humidity = data.humidity;
 
         env.has_wind_speed = true;
         env.wind_speed = data.windSpeed;
